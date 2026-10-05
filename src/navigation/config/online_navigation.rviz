@@ -1,0 +1,577 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /ROGMap1
+      Splitter Ratio: 0.45
+    Tree Height: 420
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+    Expanded:
+      - /2D Goal Pose1
+Visualization Manager:
+  Class: ""
+  Name: root
+  Enabled: true
+  Value: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: camera_init
+    Frame Rate: 30
+  Displays:
+    # ------------------------------------------------------------------ 参考
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Value: true
+      Alpha: 0.25
+      Cell Size: 1
+      Color: 120; 120; 120
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Value: false
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+      Marker Scale: 0.6
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+      Update Interval: 0
+
+    # ------------------------------------------------- 在线地图（只保留两层）
+    # 层 1：全局二维地形图（世界固定，planner 实际查询的那张图）
+    #   - Global traversability : /global_terrain/nav_grid     (OccupancyGrid: 未知/可通行/占据)
+    #   - Blocked edges         : /global_terrain/blocked_edges (平台边缘/坑/坡道侧边)
+    # 层 2：实时障碍（当前 ROGMap 滚动窗口看到的占据体素）
+    #   - Real-time obstacles   : /rog_map/occupied
+    # 其余调试话题（frontier/esdf/height_delta/layer_value...）不再默认显示：RViz 里勾选
+    # 未知/膨胀/ESDF 会让 ROGMap 额外做 boxSearch，直接拖慢规划线程。
+    - Class: rviz_common/Group
+      Name: Online Map
+      Enabled: true
+      Value: true
+      Displays:
+        - Class: rviz_default_plugins/Map
+          Name: Global traversability
+          Enabled: true
+          Value: true
+          Alpha: 0.699999988079071
+          Color Scheme: map
+          Draw Behind: true
+          Use Timestamp: false
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Best Effort
+            Value: /global_terrain/nav_grid
+        - Class: rviz_default_plugins/MarkerArray
+          Name: Blocked edges
+          Enabled: true
+          Value: true
+          Namespaces: {}
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Best Effort
+            Value: /global_terrain/blocked_edges
+        - Class: rviz_default_plugins/PointCloud2
+          Name: Real-time obstacles
+          Enabled: true
+          Value: true
+          Alpha: 1
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: -1
+            Value: true
+          Axis: Z
+          Channel Name: intensity
+          Color: 230; 60; 60
+          Color Transformer: FlatColor
+          Decay Time: 0
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 4096
+          Min Color: 0; 0; 0
+          Min Intensity: 0
+          Position Transformer: XYZ
+          Selectable: true
+          Size (Pixels): 4
+          Size (m): 0.07999999821186066
+          Style: Flat Squares
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Best Effort
+            Value: /rog_map/occupied
+          Use Fixed Frame: true
+          Use rainbow: true
+
+    # --------------------------------------------------------------- 定位
+    - Class: rviz_common/Group
+      Name: LIO
+      Enabled: true
+      Value: true
+      Displays:
+        - Class: rviz_default_plugins/PointCloud2
+          Name: Registered cloud
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: -1
+            Value: false
+          Axis: Z
+          Channel Name: z
+          Color: 255; 255; 255
+          Color Transformer: Intensity
+          Decay Time: 0
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 4096
+          Min Color: 0; 0; 0
+          Min Intensity: 0
+          Position Transformer: XYZ
+          Selectable: true
+          Size (Pixels): 2
+          Size (m): 0.05000000074505806
+          Style: Points
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /cloud_registered
+          Use Fixed Frame: true
+          Use rainbow: true
+        - Class: rviz_default_plugins/PointCloud2
+          Name: Registered cloud (dense)
+          Enabled: false
+          Value: false
+          Alpha: 0.5
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: -1
+            Value: true
+          Axis: Z
+          Channel Name: z
+          Color: 255; 255; 255
+          Color Transformer: Intensity
+          Decay Time: 0
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 4096
+          Min Color: 0; 0; 0
+          Min Intensity: 0
+          Position Transformer: XYZ
+          Selectable: true
+          Size (Pixels): 2
+          Size (m): 0.029999999329447746
+          Style: Points
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Best Effort
+            Value: /cloud_registered_full
+          Use Fixed Frame: true
+          Use rainbow: true
+        - Class: rviz_default_plugins/PointCloud2
+          Name: Cloud body (imu_link)
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: -1
+            Value: true
+          Axis: Z
+          Channel Name: intensity
+          Color: 255; 255; 255
+          Color Transformer: Intensity
+          Decay Time: 0
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 4096
+          Min Color: 0; 0; 0
+          Min Intensity: 0
+          Position Transformer: XYZ
+          Selectable: true
+          Size (Pixels): 3
+          Size (m): 0.05000000074505806
+          Style: Flat Squares
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /cloud_registered_body
+          Use Fixed Frame: true
+          Use rainbow: true
+        - Class: rviz_default_plugins/Odometry
+          Name: Robot odometry
+          Enabled: true
+          Value: true
+          Angle Tolerance: 0.10000000149011612
+          Keep: 1
+          Position Tolerance: 0.10000000149011612
+          Shape:
+            Alpha: 1
+            Axes Length: 0.4000000059604645
+            Axes Radius: 0.019999999552965164
+            Color: 255; 25; 0
+            Head Length: 0.30000001192092896
+            Head Radius: 0.10000000149011612
+            Shaft Length: 1
+            Shaft Radius: 0.05000000074505806
+            Value: Axes
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /aft_mapped_to_init
+        - Class: rviz_default_plugins/Odometry
+          Name: High-frequency odometry
+          Enabled: false
+          Value: false
+          Angle Tolerance: 0.10000000149011612
+          Keep: 1
+          Position Tolerance: 0.10000000149011612
+          Shape:
+            Alpha: 1
+            Axes Length: 0.30000001192092896
+            Axes Radius: 0.014999999664723873
+            Color: 60; 200; 255
+            Head Length: 0.30000001192092896
+            Head Radius: 0.10000000149011612
+            Shaft Length: 1
+            Shaft Radius: 0.05000000074505806
+            Value: Axes
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /OdometryHighFreq
+
+    # ------------------------------------------------------------- 规划与目标
+    - Class: rviz_common/Group
+      Name: Plan
+      Enabled: true
+      Value: true
+      Displays:
+        # 唯一默认可视路径：MINCO -> 0.05 m 弧长重采样 -> 切线 yaw -> 终点用户朝向
+        - Class: rviz_default_plugins/Path
+          Name: Final MPC Plan
+          Enabled: true
+          Value: true
+          Alpha: 1
+          Buffer Length: 1
+          Color: 40; 220; 80
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.05000000074505806
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /plan
+        # --- debug 路径显示：publisher 全部保留，RViz 默认关闭 ---
+        - Class: rviz_default_plugins/Path
+          Name: A* raw (/debug/path_astar_raw)
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Buffer Length: 1
+          Color: 90; 150; 255
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/path_astar_raw
+        - Class: rviz_default_plugins/Path
+          Name: LOS anchors (/debug/path_los)
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Buffer Length: 1
+          Color: 90; 150; 255
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/path_los
+        - Class: rviz_default_plugins/Path
+          Name: MINCO seed (/debug/path_minco_seed)
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Buffer Length: 1
+          Color: 160; 160; 160
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.019999999552965164
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/path_minco_seed
+        - Class: rviz_default_plugins/Path
+          Name: MINCO optimized (/debug/path_minco_optimized)
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Buffer Length: 1
+          Color: 255; 180; 0
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.019999999552965164
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /debug/path_minco_optimized
+        - Class: rviz_default_plugins/Path
+          Name: A* guide (/astar_path_vis)
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Buffer Length: 1
+          Color: 90; 150; 255
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /astar_path_vis
+        - Class: rviz_default_plugins/Pose
+          Name: Goal pose
+          Enabled: true
+          Value: true
+          Alpha: 1
+          Color: 255; 100; 30
+          Head Length: 0.30000001192092896
+          Head Radius: 0.10000000149011612
+          Shaft Length: 0.5
+          Shaft Radius: 0.029999999329447746
+          Shape: Arrow
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /goal_pose
+        - Class: rviz_default_plugins/MarkerArray
+          Name: Robot self filter
+          Enabled: true
+          Value: true
+          Namespaces: {}
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /rog_map/cloud_filter/markers
+        - Class: rviz_default_plugins/Path
+          Name: Optimized path
+          Enabled: false
+          Value: false
+          Alpha: 1
+          Buffer Length: 1
+          Color: 255; 180; 0
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.019999999552965164
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /opt_path_vis
+        - Class: rviz_default_plugins/Path
+          Name: MINCO candidates
+          Enabled: false
+          Value: false
+          Alpha: 0.4000000059604645
+          Buffer Length: 1
+          Color: 200; 200; 60
+          Head Diameter: 0.30000001192092896
+          Head Length: 0.20000000298023224
+          Length: 0.30000001192092896
+          Line Style: Lines
+          Line Width: 0.019999999552965164
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /minco_candidate_path_vis
+        - Class: rviz_default_plugins/Marker
+          Name: MINCO control points
+          Enabled: false
+          Value: false
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /minco_control_points_vis
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetGoal
+      Topic: /goal_pose
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 12
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.6000000238418579
+      Target Frame: base_link
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 0
+    Saved: ~
+Window Geometry:
+  Width: 1600
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Displays:
+    collapsed: false
+  Views:
+    collapsed: true
+  Tool Properties:
+    collapsed: false

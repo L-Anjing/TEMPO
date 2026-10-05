@@ -1,0 +1,124 @@
+# 单 MID-360 在线 LIO；仅使用本次运行的观测，不加载先验地图。
+# 保留 ROS 2 参数文件外层，组内风格与 fastlio 的 mapping/mid360.yaml 一致。
+# 本文件是 TF / 里程计 / 外参的唯一来源：导航 launch 会读同一份，把 robot_extrinsic
+# 注入 ROGMap 射线原点，并校验 frames 与规划器一致。改这里必须同时重启全部窗口。
+/**:
+    ros__parameters:
+        # ------------------------------------------------------------ 输入话题
+        common:
+            lid_topic: "/livox/lidar"       # 输入点云话题；消息类型必须与 preprocess.lidar_type 对应（1=Livox CustomMsg）。
+            imu_topic: "/livox/imu"         # 输入 IMU 话题；MID-360 约 200 Hz，是整个状态传播的时基。
+            time_diff_lidar_to_imu: 0.0     # s；雷达时间戳相对 IMU 的固定偏移，用来对齐两路数据；时标不符会表现为运动时地图重影。
+            con_frame: false                # 是否把连续多帧拼成一帧再处理；只对低帧率雷达有意义，MID-360 保持 false。
+            con_frame_num: 1                # con_frame=true 时一次拼接的帧数。
+            cut_frame: false                # 是否把一帧按时间切成多帧以提升更新频率；MID-360 保持 false。
+            cut_frame_time_interval: 0.1    # s；cut_frame=true 时的切分间隔，同时决定切分数量。
+            print_cloud_input_fps: false    # 是否周期打印实际输入点云频率；排查丢帧/被降频时打开。
+            cloud_input_fps_print_period: 1.0  # s；上面那条的打印周期。
+            debug_pose_update_detail: false    # 是否打印每次位姿更新的细粒度诊断；调匹配问题时开，代价是日志量。
+            debug_pose_update_detail_period: 1.0  # s；上面那条的打印周期。
+
+        # ------------------------------------------- 状态传播、滤波与在线地图
+        use_imu_as_input: false             # IMU 在滤波器中的角色：false=作为观测(30 维 state_output)，true=作为输入(24 维 state_input)。两种模式的状态量、过程噪声参数和 batch 去畸变实现都不同，切换要连带看下面几组 *_input/*_output 噪声。
+        prop_at_freq_of_imu: true           # 是否按 IMU 频率做状态传播；false 会退化成按雷达帧率传播，`/OdometryHighFreq` 失去意义。
+        check_satu: true                    # 是否做 IMU 饱和检查，超限段直接丢弃，避免剧烈运动污染状态。
+        init_map_size: 10                   # 建初始地图所需的最少特征点数；太小会让地图从第一帧就带偏。
+        point_filter_num: 1                 # 预处理抽稀：每 N 个点取 1 个。1=全用；调大省 CPU 但直接损失定位精度。
+        space_down_sample: true             # 是否对表面特征做体素降采样（配合 filter_size_surf）。
+        filter_size_surf: 0.1               # m；表面特征降采样体素边长，决定 IEKF 每帧实际参与匹配的点数与耗时。
+        filter_size_map: 0.1               # m；在线地图代表点间距（iVox 每个该尺度子格只留一个点）。调大省 CPU，但会丢细节并加剧 z 抖动。
+        ivox_nearby_type: 6                 # iVox 邻域搜索范围：6=六邻域，18/26 依次更全也更慢。
+        runtime_pos_log_enable: false       # 是否把状态/性能统计落盘；只在离线分析时打开。
+        runtime_log_path: "/tmp/point_lio_log"  # 上面那份统计的输出目录。
+
+        # --------------------------------------------------------------- 预处理
+        preprocess:
+            lidar_type: 1                   # 雷达类型：1=Livox CustomMsg（MID-360 走这条），其他值对应 VELO16/OUST64 等标准点云。
+            scan_line: 4                    # 线数；只对机械式雷达有效，MID-360 不使用。
+            timestamp_unit: 3               # 标准 PointCloud2 时间字段单位：0=s，1=ms，2=us，3=ns；Livox CustomMsg 不使用。
+            blind: 0.8                  # m；丢弃盲区球心该半径内的点，用来滤掉自车/支架回波。
+            blind_center_enable: true      # 是否把盲区球心从雷达原点挪到 blind_center。
+            blind_center: [0.1025, 0.303, -0.2634]   # m；盲区球心在雷达系中的位置，仅上一项为 true 时生效。
+
+        # ------------------------------------------------------- 滤波与匹配
+        mapping:
+            imu_en: true                    # 是否使用 IMU；关掉会退化成纯激光里程计，重力与姿态只能靠 gravity_init 定。
+            extrinsic_est_en: false         # 是否在线估计雷达—IMU 外参；标定好后必须 false，为 true 时与固定外参冲突（代码直接报错）。
+            imu_time_inte: 0.005            # s；IMU 传播的分段时长，影响传播精度与单帧耗时。
+            lidar_time_inte: 0.1            # s；单帧点云覆盖的时间长度上限，用于切帧。
+            satu_acc: 3.0                   # g；加速度饱和阈值，超过即判定该段 IMU 无效。
+            satu_gyro: 35.0                 # rad/s；角速度饱和阈值。
+            acc_norm: 1.0                   # 加速度计单位：1.0=g，9.81=m/s²。必须与驱动实际输出一致，填错会把重力算错一个量级。
+            lidar_meas_cov: 0.01            # 激光点观测噪声协方差；越小越信任雷达。
+            acc_cov_output: 500.0           # 输出模式(use_imu_as_input=false)的加速度过程噪声；越大越信任 IMU 预测。
+            gyr_cov_output: 1000.0          # 输出模式(use_imu_as_input=false)的角速度过程噪声。
+            b_acc_cov: 0.0001               # 加速度计零偏随机游走噪声。
+            b_gyr_cov: 0.0001               # 陀螺仪零偏随机游走噪声。
+            imu_meas_acc_cov: 0.01          # IMU 加速度测量噪声（观测方程里用）。
+            imu_meas_omg_cov: 0.01          # IMU 角速度测量噪声（观测方程里用）。
+            gyr_cov_input: 0.01             # 输入模式(use_imu_as_input=true)的角速度过程噪声。
+            acc_cov_input: 0.1              # 输入模式(use_imu_as_input=true)的加速度过程噪声。
+            plane_thr: 0.1                  # 平面拟合距离阈值，决定哪些近邻点算同一个平面。
+            pose_update_time_bin_ms: 2.0    # ms；原逐点路径的 IEKF 更新批处理时间桶。batch.enable=true 时被忽略并打印告警，由 batch.dt 取代。
+            match_s: 81.0                   # 平面内点门限倍率：点到拟合平面距离超过 match_s·d² 即判为外点丢弃。
+            ivox_grid_resolution: 2.0       # m；iVox 顶层体素边长，决定一次邻域搜索要扫多少个体素；调小更准但更慢。
+            # Batch-LIO 式毫秒级批量更新。enable=false 时完全走原 point-wise 路径。
+            # 一个 batch 内所有点联合构造 H/z，只做一次 IEKF 更新；参考时刻取 batch 末点时间。
+            batch:
+                enable: true                # batch 模式总开关；false 时行为与改造前完全一致（逐点更新）。
+                dt: 0.001                   # s；batch 时间窗。<=0 回退逐时间戳(逐点)更新。
+                deskew: true                # batch 内把每个点按当前 posterior 补偿到 batch 末端时刻；仅 use_imu_as_input=false 分支实现。
+                omp: true                   # batch 内 KNN/平面拟合 OpenMP 并行；必须搭配 OMP_WAIT_POLICY=PASSIVE，否则自旋抢核反而掉实时率。
+            gravity: [0.0, 0.0, -9.81]      # 世界系重力向量；用于给状态里的 gravity 赋初值和复位。
+            gravity_init: [0.0, 0.0, -9.81] # 仅当 imu_en=false 时用它定初始姿态；imu_en=true 时由静止段实测重力方向取代。
+
+        # T_B^A 将 p_B 变换到 p_A；这里配置的是 T_imu^lidar。
+        # p_lidar = R_imu_in_lidar * p_imu + T_imu_in_lidar。
+        # IMU 原点在雷达系中为 [11.0, 23.29, -44.12] mm，与 fastlio 完全一致。
+        # Point-LIO 内部使用其逆变换 T_lidar^imu，配置本身不取反。
+        sensor_extrinsic:
+            # R 按行排列，单位矩阵＝雷达与 IMU 同朝向。
+            imu_in_lidar_R: [1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.0, 0.0, 1.0]
+            imu_in_lidar_T: [0.011, 0.02329, -0.04412]  # m；IMU 原点在雷达系中的位置，影响去畸变和杆臂。
+
+        # T_lidar^robot：雷达在底盘中心系中的安装位姿，p_robot = R * p_lidar + T。
+        # R 按行排列；同时用于机器人里程计、静态 TF 和 ROGMap 射线原点。
+        robot_extrinsic:
+            lidar_to_robot_R: [1.0, 0.0, 0.0,
+                               0.0, 1.0, 0.0,
+                               0.0, 0.0, 1.0]
+            # m；雷达原点在底盘中心系的坐标。这里定义 base_link 到底在哪：置零会把 base_link 挪到雷达原点，
+            # ROGMap 的 footprint 净空圈（0.626 m）和车身滤除盒（0.70×0.70）会跟着偏 0.32 m，实测直接把起点判成不可通行。
+            lidar_to_robot_T: [-0.1025, -0.303, 0.2634]
+
+        # TF/消息里的坐标系名字；导航 launch 会校验 frames.odom 与规划器 map_frame 一致。
+        frames:
+            odom: "camera_init"             # 世界系；点云、TF、路径都在这个系里。
+            robot: "base_link"              # 底盘中心；里程计 child_frame_id，ROGMap 车身滤除盒所在系。
+            robot_high_frequency: "base_link_hf"  # 高频里程计的独立 child frame，避免和低频位姿在 TF 上打架。
+            lidar: "livox_frame"            # 雷达点云坐标系。
+            imu: "imu_link"                 # IMU 芯片坐标系；滤波内部状态在这里表达。
+
+        odometry:
+            high_frequency_enable: true     # 是否发布 /OdometryHighFreq；逐 IMU 传播，MID-360 输入约 200 Hz。
+            max_correction_age_sec: 0.3     # s；雷达校正落后 IMU 超过该值时停止高频输出，禁止用纯预测掩盖处理积压。
+            zero_at_start: true             # 延迟冻结输出零点；odom/TF/世界系点云共用同一个零点，滤波器内部世界系不重写。
+            zero_delay_sec: 1.5             # s；首次 LiDAR 校正后再等这么久才冻结零点（IMU 初始化只有 roll/pitch 可信，yaw 任意）。
+            publish_odometry_without_downsample: true  # 是否在每个 IEKF 更新后都发里程计（配合下面的限频），否则只按雷达帧率发。
+            publish_frequency_hz: 200       # Hz；成功状态更新后 /aft_mapped_to_init 的传感器时间发布限频。
+
+        diagnostics:
+            odom_log_interval_sec: 1.0      # s；周期打印底盘 xyz[m] 与 rpy[deg]；0 关闭。
+
+        publish:
+            path_en: true                   # 是否发布 /path（RViz 轨迹）。
+            scan_publish_en: true           # 是否发布 /cloud_registered（降采样世界系点云）与 /cloud_registered_full（稠密，ROGMap 输入）。
+            scan_bodyframe_pub_en: false    # 是否额外发布 imu_link 系点云 /cloud_registered_body；调试用，会增加带宽。
+            tf_send_en: true                # 是否发布 camera_init -> base_link 动态 TF 与 base_link -> livox_frame -> imu_link 静态 TF。关了整栈就没有位姿。
+
+        pcd_save:
+            pcd_save_en: false              # 是否把帧累积成 PCD 落盘；影响实时性，只在建图存档时开。
+            accumulated_map_publish_hz: 1.0 # Hz；/Laser_map 累积地图的低频发布频率。
+            interval: 3600                  # 帧；每这么多帧写一个 PCD 文件。

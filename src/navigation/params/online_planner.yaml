@@ -1,0 +1,308 @@
+# 在线 MINCO 路径规划、嵌入式 ROGMap 与 Nav2 PlannerServer 参数。
+# 几何和地形参考 fastlio_nav2；换车时核对安装与通行能力。
+# 外参不在这里：sensor_in_robot / sensor_in_robot_R 由 launch 从 Point-LIO 的
+# config/mapping/mid360.yaml 读取并注入，避免两处维护同一份标定。
+planner_server:
+    ros__parameters:
+        use_sim_time: false
+        expected_planner_frequency: 10.0   # Hz；Nav2 认为规划器应该跑多快，用于规划超时/降频告警，不改变实际调用频率。
+        planner_plugins: ["MincoPlanner"] # 实际生效的规划插件列表；只有这一个。
+
+        # 规划插件：只向外部 MPC 发布几何路径。
+        MincoPlanner:
+            plugin: navigation/MincoPlanner
+            planner_mode: EXPLORATION      # PRIORMAP=用先验地图走到固定目标；EXPLORATION=在没有目标时选边界点探索。决定下面 exploration.* 是否生效。
+            external_mpc_mode: true        # true=只发几何路径给外部 MPC，自己不做速度跟踪闭环；实车走这条。
+            external_odom_timeout: 0.5     # s；里程计超过该时长没更新就判失效，撤销路径。
+            external_map_timeout: 1.0      # s；地图超过该时长没更新就判失效，撤销路径。
+            frames:
+                map_frame: camera_init     # 路径/代价地图所在世界系；必须等于 Point-LIO 的 frames.odom（launch 会校验）。
+                rog_frame: camera_init     # ROGMap 查询所用世界系；同上。
+                robot_frame: base_link     # 机器人本体；必须等于 Point-LIO 的 frames.robot。
+            # 只在 planner_mode=EXPLORATION 时生效：没有目标时沿地图边界找下一个观测点。
+            exploration:
+                boundary_margin: 0.75      # m；候选点必须距地图边界（未知区域边缘）至少这么远，避免贴着边界规划。
+                boundary_sample_step: 0.025 # m；沿边界采样候选点的步长，越小候选越密、搜索越慢。
+                prefer_goal_direction: true # 是否在候选点里偏向朝任务目标方向的那些，避免探索时往回走。
+                use_observed_frontiers: true # 是否改用已观测 frontiers 当候选（而不是裸的边界格）；更稳但更依赖地图质量。
+                # 这里只在“直接朝最终 goal 规划失败”时兜底；UNKNOWN 不再被当成障碍。
+            tolerance: 0.3                 # m；目标点容差，进入该半径即认为到达。
+            allow_unknown: true            # 搜索器是否允许穿过 UNKNOWN。乐观规划下必须为 true：UNKNOWN 与 FREE 等价，只有已观测障碍才禁行。
+            odom_topic: /aft_mapped_to_init # 里程计输入话题；Point-LIO 的底盘中心输出。
+            lidar_offset_x: 0.0            # m；雷达相对底盘的 x 偏移，用于把 twist 的杆臂速度补偿到底盘。实车里程计已是底盘中心，保持 0。
+            lidar_offset_y: 0.0            # m；同上，y 方向。
+            # 插件内部的在线地图；无需独立启动 ROGMap 节点。
+            rog_map:
+                frame_id: camera_init      # 地图所在世界系；与 frames.map_frame 一致。
+                resolution: 0.05           # m；占据体素分辨率，决定地图精细度和内存/CPU（0.05 → 10×10×4 m 窗口内 320 万体素）。
+                inflation_resolution: 0.05 # m；膨胀图（多分辨率计数器图）的粗格分辨率，决定膨胀的精度与代价。
+                map_size: [5.0, 5.0, 2.0] # m；以机器人为中心的滚动 3D 窗口尺寸，超出即滑窗丢弃。
+                # Broad absolute bounds; the rolling 3D window limits memory and local queries.
+                virtual_ground_height: -1000.0  # m；地图绝对下界（不是地面高度），配合滑窗限制总内存。
+                virtual_ceil_height: 1000.0     # m；地图绝对上界。
+                load_pcd_en: false         # 是否加载先验 PCD 地图启动；在线建图保持 false。
+                fix_map_origin: [0.0, 0.0, 0.0] # m；滑窗关闭时地图的原点。
+                map_sliding:
+                    enable: true           # 是否启用零拷贝滑窗；关掉后地图不跟随机器人移动。
+                    threshold: 0.2         # m；机器人偏离地图中心超过该距离就滑动一次，越小滑动越频繁。
+                    center_offset_enable: false # 是否让机器人停在地图中心的偏移位置（而不是正中），给某个方向留更多空间。
+                ros_callback:
+                    enable: true           # 是否直接订阅 ROS 话题更新地图；false 时由外部调 updateMap()。
+                    cloud_topic: /cloud_registered_full # 输入点云；必须是 Point-LIO 的稠密世界系点云（已含去畸变和外参）。
+                    odom_topic: /aft_mapped_to_init     # 输入里程计；提供每帧点云的位姿。
+                    robot_frame: base_link # 精确点云时刻的 TF；launch 与 LIO 底盘系保持一致。
+                    odom_timeout: 0.5      # s；里程计停更超过该时长就丢弃点云，避免用过期位姿把点云写歪。
+                    update_period_ms: 15   # ms；66 Hz 轮询最新帧（latest-only，不积压）。只降低“点云到达→开始处理”的等待，实测地图处理约 32 ms。
+                time_sync:
+                    odom_buffer_sec: 2.0   # s；按消息时间保存里程计历史。
+                    max_odom_gap_sec: 0.05 # s；插值两端里程计允许的最大间隔。
+                    cloud_wait_timeout_ms: 30 # ms；等待未来端里程计的最长墙钟时间。
+                    max_stamp_age_sec: 2.0 # s；消息与 ROS 时钟允许的时间差，回放须 --clock/use_sim_time。
+                # 安装外参由 launch 从 Point-LIO 唯一配置注入；不要在此重复测量值。
+                sensor_in_robot: [0.0, 0.0, 0.0]  # m；雷达在底盘系中的位置（射线起点），launch 覆盖。
+                sensor_in_robot_R: [1.0, 0.0, 0.0,  # 雷达相对底盘系的旋转，按行排列，launch 覆盖。
+                                    0.0, 1.0, 0.0,
+                                    0.0, 0.0, 1.0]
+                # 车身自滤：把落在车体包围盒内的回波删掉，避免自车变成障碍物。
+                cloud_filter:
+                    enable: true
+                    position_frame: base_link  # 包围盒所在坐标系；盒子的中心与尺寸都在这个系里解释。
+                    filter_mode: transform_cloud  # 点转到车体系判断；保留原世界系坐标。
+                    remove_inside: true    # true=删除盒内点（自车回波），false=只保留盒内点。
+                    z_filter_enable: false # 是否额外按 z 平面裁剪；关掉以保留包围盒外的地面、坡道和台阶支持点。
+                    box_padding: 0.0       # m；包围盒各方向的外扩量，调大可多滤一点但会吃掉近处真实障碍。
+                    position: {x: 0.0, y: 0.0, z: 0.70}   # m；包围盒中心（base_link 系）。base_link 必须是底盘中心，否则盒子会整体偏移。
+                    box_size: {x: 0.70, y: 0.70, z: 1.40} # m；包围盒尺寸，换车必须重新量，太小会把自己的底盘当地图障碍。
+                    publish_visualization: true # 是否发布 /rog_map/cloud_filter/markers（RViz 里的 "Robot self filter" 框）。
+                # 光线投射：把传感器到命中点之间的空间标记为 free，是地图“清空”的唯一来源。
+                raycasting:
+                    enable: true           # 关闭后只累加命中点，不再清空，动态物体会留下拖影。
+                    p_min: 0.12            # 占据概率下限。
+                    p_miss: 0.49           # 射线经过的空空间证据，必须小于 0.5。
+                    p_free: 0.499          # 低于该阈值判定 FREE。
+                    p_occ: 0.85            # 高于该阈值判定 OCCUPIED。
+                    p_hit: 0.9             # 回波命中证据，必须大于 0.5。
+                    p_max: 0.98            # 占据概率上限。
+                    batch_update_size: 1   # 累积多少个点云帧做一次批量投线；调大省 CPU 但地图更新更迟钝。
+                    ray_range: [0.03, 10.0] # m；射线有效区间。比下限近的判为自车、比上限远的忽略。
+                    local_update_box: [5.0, 5.0, 2.0] # m；每帧只在这个窗口内投线，是实时性的主要调节项。
+                    unk_thresh: 0.70       # 一个膨胀粗格里未观测子格占比超过该值就判为 UNKNOWN（0~1）。
+                    parallel_enable: false # 是否用 OpenMP 并行投线；本机实测并行 merge 比串行慢约 2 倍，保持 false。
+                decay:
+                    # Keep observed supporting ground. Dynamic clearing uses later miss rays.
+                    enable: false          # 概率衰减/遗忘：关掉靠 miss 射线清动态物体，开了会连同静态地图一起淡出。
+                # 投影层：把 3D 占据压成 2D 可通行层，规划器查的就是这一层。
+                projection:
+                    enable: true
+                    prior_map:
+                        enable: false      # 是否把先验地图并入投影层；在线模式关闭。
+                    robot_relative_scan: true  # 扫描范围是否随机器人移动（而不是固定绝对高度带）。
+                    scan_z_min_offset: -1.5    # m；参与投影的最低高度（相对机器人 z）。
+                    scan_z_max_offset: 1.5     # m；参与投影的最高高度；区间外的点不参与，避免天花板/地面噪声。
+                    unknown_as_occupied: false # 未观测格是否写回成障碍。规划语义要求 UNKNOWN 保持 UNKNOWN，因此为 false（开启地形层时由地形层输出决定）。
+                    min_observed_voxels: 2     # 一个 2D 格至少要有这么多观测体素才认可它的高度，抑制噪点。
+                    surface_height_delta_max: 0.10 # m；相邻格高度差小于该值视为同一支持面（平地）。
+                    wall_height_delta_min: 0.20    # m；高度跳变大于该值判为墙/障碍。
+                    hysteresis_enable: false   # 状态翻转需要连续多帧确认，抑制边界抖动。
+                    obstacle_hold_time: 0.0    # s；障碍物在失去观测后保留多久，0=立即按最新观测更新。
+                    mask_filter_en: false      # 是否启用掩码过滤（按掩码把某些区域强制设为不可通行）。
+
+                # 支持面、坡道、楼梯与车身净空。
+                terrain:
+                    enable: true
+                    # 底盘中心里程计的 z 作为当前支持面高度基准。
+                    # Bootstrap the current body blind spot after surrounding ground is observed.
+                    seed_current_footprint: true   # 是否用当前足印范围补种支持面，填掉车身正下方看不见的盲区。
+                    ground_seed_tolerance: 0.10    # m；补种时允许的高度误差。
+                    slope_min_deg: 5.0             # deg；坡度判定下限，低于它算平地。
+                    slope_max_deg: 35.0            # deg；坡度判定上限，高于是不可通行障碍。
+                    slope_fit_radius: 0.20         # m；拟合坡面的邻域半径。
+                    slope_max_residual: 0.020      # m；坡面拟合残差上限，超过说明不是平面而不是坡。
+                    stair_rise: 0.15               # m；台阶单级高度（期望值）。
+                    stair_tread: 0.30              # m；台阶踏面深度（期望值）。
+                    stair_rise_tolerance: 0.025    # m；台阶高度容差。
+                    stair_half_width: 0.55         # m；判定为“可跨越台阶”所需的半宽。
+                    stair_min_width: 0.65          # m；台阶最小宽度，窄于此判为障碍而不是台阶。
+                    terrain_min_component_area: 0.50 # m²；小于该面积的同类地形碎片被忽略，抑制噪点。
+                    obstacle_min_height: 0.15      # m；高出支持面这个值的体素才算障碍，滤掉地面噪声。
+                    # --- no-support（平台边缘/坑/坡道侧边）证据参数 ---
+                    # z_ref = 预计地面高度（第一版取邻居支撑面高度）。support band 内必须被真实
+                    # ray miss 确认为 FREE，且 z_ref 下方也是 FREE，且 band 内没有支撑回波，
+                    # 才算一帧强 no-support；support band 仍是 UNKNOWN 时不下任何结论。
+                    support_band_up: 0.05          # m；support band 上界 = z_ref + 该值。
+                    support_band_down: 0.05        # m；support band 下界 = z_ref - 该值。
+                    drop_probe_depth: 0.20         # m；below band = [z_ref - 该值, z_ref - support_band_down]，用来区分“地面点没打到”和“射线已经穿到更低空间”。
+                    min_free_voxels: 2             # band 内至少这么多 FREE 体素才算“确认自由空间”。
+                    alignment_cosine: 0.9659258263 # 路径切向与地形走向的夹角容差（cos15°），用于对齐代价。
+                    alignment_weight: 2000.0       # 对齐项权重，越大越倾向顺着坡/台阶方向走。
+                    flat_clearance_radius: 0.5656854249 # m；平地车身净空半径（0.4×√2，对应 0.8×0.8 外接圆）。
+                    terrain_half_length: 0.40      # m；车身半长，用于方向相关的净空检查。
+                    terrain_half_width: 0.40       # m；车身半宽。
+                    yaw_independent_footprint: true # 是否用与朝向无关的外接圆净空（全向底盘用 true）。
+                    clearance_margin: 0.025        # m；净空余量，叠加在净空半径上。
+                # 全局二维地形图：世界系固定，planner（A*/LOS/MINCO/validator）统一查询它。
+                # ROGMap 的滚动 3D 窗口只负责机器人附近的观测，本图把局部观测增量写回世界格，
+                # 历史区域不会因为机器人移动而消失，但仍可被新观测修正。
+                global_map:
+                    enable: true               # 是否启用全局图；false 时回退到滚动局部图（旧行为）。
+                    resolution: 0.05           # m；必须与 resolution 一致（本轮不做跨分辨率累积）。
+                    # 场地 11x11 m，camera_init 在启动角上，场地沿 +x / -y 方向展开。
+                    # 蓝方从左**上**角启动 -> 场地 y ∈ [-11, 0]；红方从左**下**角启动 ->
+                    # 场地 y ∈ [0, +11]。两队沿 y 反向，所以同一份配置必须同时覆盖两侧，
+                    # 否则换队启动会出现 START_OUTSIDE_GLOBAL_MAP / OUTSIDE_GLOBAL_MAP、
+                    # 规划直接不可用（不是降级）。
+                    # 网格覆盖 [-2, 12] x [-12, 12]：11 m 场地 + 每边 1 m 余量。
+                    size_x: 14.0               # m；x 方向：280 格 @0.05。
+                    size_y: 24.0               # m；y 方向：480 格 @0.05，同时覆盖红/蓝两个启动角。
+                    origin_x: -2.0             # m；网格左下角世界坐标（不是地图中心）。
+                    origin_y: -12.0            # m；同上。两个方向各留 1 m 余量：倒车/定位抖动不会让 start 出图。
+                    # 确定只用单队时可以把图收紧到 14x13：
+                    #   蓝方（场地在 y<0）：origin_y: -12.0, size_y: 13.0
+                    #   红方（场地在 y>0）：origin_y:  -1.0, size_y: 13.0
+                    slope_max_deg: 35.0        # deg；相邻支撑格高度梯度超过 tan(该值) 判为 BLOCKED 边。平地/坡道/平台都可通行。
+                    slope_min_deg: 5.0         # deg；只用于给 MINCO 的走向对齐项分类 SLOPE。
+                    field_enable: true         # 是否为全局图重建二维 ESDF（MINCO/A* 动态碰撞用）。
+                    field_max_distance: 6.0    # m；正距离截断。
+                    field_min_distance: -3.0   # m；负距离截断。
+                    field_clamp_distance: true # 是否夹紧距离。
+                    field_update_period_sec: 0.2 # s；全局 EDT 较贵，按该周期重建，不每帧重算。
+                    # no-support 证据累计：只有强证据帧才增加 void_confidence，超过
+                    # void_confirm 才升级成 BLOCKED_EDGE（多帧确认，单帧不封）。
+                    void_gain: 0.0             # 每帧强 no-support 证据增量（0~1）；0 = 关闭 case B。
+                    void_confirm: 0.75         # 累积到该值才升级成 BLOCKED_EDGE。
+                # 距离场：给优化器提供到最近障碍的距离与梯度。
+                field:
+                    enable: true
+                    inflation_radius: 0.0      # m；场里额外的膨胀半径，0=直接用真实占据。
+                    max_distance: 6.0          # m；正距离截断，超过按截断值处理。
+                    min_distance: -3.0         # m；负距离（障碍内部）截断。
+                    clamp_distance: true       # 是否把距离夹在上述区间内，避免优化时梯度爆炸。
+                    interpolation: bilinear    # 查询距离场的插值方式：bilinear 平滑但更慢，nearest 更快。
+                    update_rate: 10.0          # Hz；距离场更新频率，明显低于地图更新率以省 CPU。
+                performance:
+                    enable: true               # 是否采集 ROGMap 内部耗时统计。
+                    detailed_csv_enable: true  # 是否输出明细 CSV。
+                    detailed_csv_path: /tmp/online_rog_map_perf.csv # 上面那份 CSV 的路径。
+                    dirty_column_enable: true  # 是否只更新变化的列（增量更新），关掉会显著变慢。
+                    parallel_raycast_enable: false # 是否并行投线；与 raycasting.parallel_enable 对应，实测保持 false 更快。
+                # 自车附近诊断点云：/debug/rog_raw_near_robot、/debug/rog_after_self_filter、
+                # /debug/rog_obstacle_points。只在排查“机器人周围为什么是障碍”时打开。
+                debug_clouds:
+                    enable: false
+                    half_extent_xy: 1.6   # m；只保留机器人周围 ±该值的 xy 范围。
+                    min_z: -0.5           # m；camera_init 下的 z 下限。
+                    max_z: 1.6            # m；camera_init 下的 z 上限。
+
+                # RViz 可视化。每个被订阅的云都要把 range/resolution 的立方逐体素扫一遍，是可视化开销主项。
+                visualization:
+                    enable: true               # 总开关；关掉后所有 /rog_map/* 可视化话题都不发布。
+                    frame_id: camera_init      # 可视化所在世界系。
+                    rate: 3.0                  # Hz；可视化刷新率，调低直接省 CPU。
+                    global_map_enable: true    # 是否发布全局二维地形图：/global_terrain/nav_grid (OccupancyGrid) + /global_terrain/blocked_edges (平台边缘/坑/坡道侧边)。
+                    global_map_rate: 1.0       # Hz；全局图发布频率。点数/格数随探索范围增长，单独限频。
+                    range: [8.0, 8.0, 3.0]     # m；以机器人为中心的可视化立方体，代价随体积立方增长。
+            # 路径搜索用的走廊安全距离：safe_dist = 到障碍距离 - robot_radius - extra_margin。
+            corridor:
+                robot_radius: 0.566        # m；车身外接圆半径，必须与 terrain.flat_clearance_radius 一致。
+                extra_margin: 0.025        # m；额外安全余量。
+
+            # 路径几何：A* 原始折线 → LOS 贪心简化 → 沿直线段均匀重采样 → MINCO。
+            path_geometry:
+                output_spacing: 0.05       # m；最终 /plan 的**弧长均匀**采样间距（旧 fastlio_nav2 的 output_spacing）。按时间采样会让慢速段过密、高速段过稀。
+                los_sampling_ratio: 0.5    # LOS 采样间距 = resolution × 该比例（0.05 × 0.5 = 0.025 m），与旧 fastlio_nav2 同级强度。
+                seed_spacing: 0.45         # m；MINCO 初始离散化间距（optimization discretization），不是硬 waypoint 间距。这些点只是优化初值，轨迹不要求精确穿过它们。
+
+            # 规划 tick：地图可以 20 Hz 更新，但 planner 只在 nominal_replan_hz 上检查一次；
+            # 这是“检查/候选规划频率”，不是“每 tick 必换路径”。
+            planner:
+                nominal_replan_hz: 2.0     # Hz；正常路径有效时的检查频率（约 500 ms）。
+                warm_start_enable: true    # 条件式热启动：同一 goal 且上一条 trajectory 仍可用时，用其剩余段当 MINCO 初值；PATH_BLOCKED / 新 goal / 旧轨迹失效时强制 COLD_START。
+
+            # 路径复用：默认 KEEP_PATH —— 当前剩余路径安全就一直沿用它。
+            # 只有 PATH_BLOCKED（路径被新障碍/OCCUPIED/BLOCKED_EDGE/足印碰撞切断）才立即换路。
+            path_reuse:
+                input_unavailable_grace_sec: 1.0  # s；短暂输入缺失保留有效 /plan，超时撤销。
+                better_path_enable: false  # 是否允许周期性找更优路径并替换。第一版关闭以保证稳定；确认稳定后再开。
+                improvement_threshold: 0.08 # 开启 better-path 时的接受阈值：新路径要比当前“剩余路径”短 8% 以上才换。
+                min_switch_interval: 1.0   # s；正常 better-path 换路的最小间隔，防止左右路线抖。PATH_BLOCKED 不受限制。
+
+            # goal 附近行为：进入 terminal_radius 后禁止普通 better-path，只允许 PATH_BLOCKED 换路，
+            # 让 controller 稳定完成 terminal approach。
+            goal_behavior:
+                terminal_radius: 0.8       # m；距 goal 小于该值就锁定最后一条 path。
+
+            # 重规划策略（兼容旧参数；improvement_ratio 是 improvement_threshold 的旧名字）。
+            replan:
+                improvement_ratio: 0.08    # 新路径相对当前剩余路径至少要缩短这么多才替换，避免地图轻微变化导致路径左右横跳。
+                check_period_sec: 0.5      # s；旧名字，等价于 planner.nominal_replan_hz=2.0。路径被新障碍切断时不受该周期限制，立即重规划。
+
+            # 全向底盘平面动力学；加速度/jerk 是待实机标定的导航建议值。
+            dynamics:
+                max_vel: 10.0              # m/s；硬件/校验硬上限（软件支持上限），不代表规划巡航速度。
+                max_acc: 3.0               # m/s²；导航建议值，须实机标定。
+                max_jerk: 10.0             # m/s³；导航建议值，须实机标定。
+                planning_vel: 2.0          # m/s；MINCO/A* 种子时间分配实际使用的巡航速度。必须明显小于 max_vel：用 10 m/s 规划会得到 ~0.8 s 的短时轨迹，位置罚项按 ∫dt 计权而失去作用，轨迹切角贴边被 validator 拒绝。
+                optimizer_margin: 0.85     # 优化器使用硬上限的该比例，留出余量。
+                validation_tolerance: 0.05 # 轻微/严重超限分界；最终发布仍须满足硬上限。
+
+            # XY 曲线优化；不约束下游 MPC 的执行朝向或时序。
+            minco_optimizer:
+                opt_freq: 20.0             # Hz；优化器求解频率上限。
+                # MINCO 头/尾边界构造模式：
+                #   ODOM       = 当前生产行为：start 用实测里程计平面速度（prepareColdStart/getCurrentSpeed），
+                #                WARM 时用上一条轨迹的速度/加速度；end 用 seed 尾切向 * end_speed。
+                #   OLD_COMPAT = 严格复刻旧 fastlio_nav2 的几何边界：start/end 都用 seed 头/尾切向，
+                #                幅值 = chord / max(chord, old_min_segment_time)，加速度 = 0。
+                # A/B 实验开关，生产默认 ODOM。
+                boundary_mode: ODOM
+                # PATH_BLOCKED 校验范围：只校验 [max(0, s_robot - lookback_margin), end]。
+                # 回看余量只用于覆盖机器人脚下那一段，绝不重查整条已走过的路径。
+                path_validation:
+                    lookback_margin: 0.2   # m；校验起点回看余量（0.1-0.3 m 量级）。
+                    block_out_of_map: false # 地图外按 UNKNOWN 处理（冻结的乐观规划语义）；true 才把 OUT_OF_MAP 当阻塞。
+                traj_goal_tolerance: 0.3   # m；轨迹末端到目标的容差。
+                enable_yaw_opt: false      # 是否优化偏航角；实车由 MPC 决定朝向，这里关掉只出几何。
+                safe_dist: 0.70            # m；优化器的障碍距离下限。必须 ≥ 地形硬净空（flat_clearance_radius 0.5657 + clearance_margin 0.025 + 半个体素 0.0354 = 0.626 m）+ 余量，否则 MINCO 会吐出“贴边但仍在足印内”的轨迹被 validator 整条拒绝。
+                collision_dist: 0.05       # m；硬碰撞距离，配合地形足印做最终安全检查。
+                lookahead_dist: 4.0        # m；局部路径前视距离，决定轨迹优化多长一段。
+                min_turn_vel: 0.2          # m/s；转弯时的最低速度，避免原地打死方向。
+                penalty_weight_time: 100.0 # 时间项权重，越大越倾向走近路。
+                penalty_weight_pos: 50000.0 # 位置（障碍）惩罚权重，越大越远离障碍。
+                penalty_weight_vel: 1500.0 # 速度平滑权重。
+                penalty_weight_acc: 1500.0 # 加速度平滑权重，越大越不抖。
+                penalty_weight_jerk: 1500.0 # jerk 超限的软惩罚；硬限由 dynamics 统一定义。
+                penalty_weight_att: 1000.0 # 姿态/朝向权重，仅在 enable_yaw_opt=true 时有意义。
+                integral_res: 24           # 每条轨迹段的积分采样点数，越大越精确也越慢。
+                opt_accuracy: 0.001        # 优化收敛阈值，越小越精确也越慢。
+                print_optimizer_log: false # 是否打印求解器迭代日志。
+                # Seed 方向软正则（旧 fastlio_nav2 的 directed_regularity，软代价，默认 OFF）：
+                # 把几何切向拉向 LocalPathProcessor 已算好的 seed 切线，只在
+                #   cos(切向, seed 切线) < cos_min 时才罚：penalty = weight·0.5·(cos_min−cos)²。
+                # 它不固定任何内部切线、不加等式约束，净空/避障罚可自由压过它。
+                direction_regularization:
+                    enable: false          # 是否启用 seed 方向软正则。默认关闭。
+                    weight: 1000.0         # 方向罚权重（OLD Weights::directed_regularity）。
+                    cos_min: 0.1           # 方向余弦下限（OLD Params::directed_cosine_min；0.1 ≈ 84°）。
+
+# Nav2 hosts the plugin; this costmap has no prior or sensor obstacle layers.
+# Path search, clearance and collision validation all use the online ROGMap snapshot.
+# 这里的 global_costmap 只是给 Nav2 提供一个占位网格，真正的障碍信息全部来自上面的 ROGMap。
+global_costmap:
+    global_costmap:
+        ros__parameters:
+            use_sim_time: false
+            global_frame: camera_init      # 全局代价地图世界系；必须等于 frames.map_frame。
+            robot_base_frame: base_link    # 机器人本体 frame；launch 用 Point-LIO 配置覆盖。
+            rolling_window: true           # 代价地图跟随机器人滚动，而不是固定大图。
+            width: 10                      # m；滚动窗口宽。
+            height: 10                     # m；滚动窗口高。
+            resolution: 0.1                # m；占位网格分辨率（规划实际查 ROGMap，不查这里）。
+            robot_radius: 0.566            # m；机器人体半径，用于 Nav2 侧的膨胀计算。
+            update_frequency: 5.0          # Hz；代价地图更新频率。
+            publish_frequency: 1.0         # Hz；代价地图发布频率。
+            track_unknown_space: true      # 是否保留未知区域（而不是一律当 free）。
+            plugins: ["inflation_layer"]   # 只挂膨胀层，没有静态层和传感器层。
+            inflation_layer:
+                plugin: nav2_costmap_2d::InflationLayer
+                enabled: false             # 关闭：净空由 ROGMap 的地形足印检查负责，避免两套膨胀叠加。
+                inflation_radius: 0.60     # m；若启用膨胀层时的膨胀半径。

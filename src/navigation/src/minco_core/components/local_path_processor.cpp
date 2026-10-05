@@ -1,0 +1,305 @@
+#include "minco_core/components/local_path_processor.hpp"
+
+namespace minco_planner {
+
+namespace {
+
+bool isLineFree(const std::shared_ptr<rog_map::MapQueryInterface> & map,
+  const Eigen::Vector3d & p1,
+  const Eigen::Vector3d & p2)
+{
+  if (!map || map->resolution() <= 0.0) {
+    return false;
+  }
+  const double dist = (p2 - p1).norm();
+  if (!map->edgeAllowed(p1, p2)) {
+    return false;
+  }
+  const int steps = static_cast<int>(std::ceil(dist / map->resolution()));
+  if (steps <= 0) {
+    return true;
+  }
+  for (int i = 0; i <= steps; ++i) {
+    const double t = static_cast<double>(i) / static_cast<double>(steps);
+    const Eigen::Vector3d p = p1 + (p2 - p1) * t;
+    unsigned int mx = 0;
+    unsigned int my = 0;
+    if (!map->footprintFree(p)) {
+      return false;
+    }
+    if (!map->worldToMap(p.x(), p.y(), mx, my)) {
+      // 地图外按 UNKNOWN 处理，继续检查后续采样点。
+      continue;
+    }
+    if (!map->isFree(mx, my)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+void LocalPathProcessor::configure(
+  double lookahead_dist,
+  double max_vel,
+  double max_acc,
+  double traj_goal_tolerance,
+  double los_sampling_ratio,
+  double seed_spacing,
+  rclcpp::Clock::SharedPtr clock,
+  rclcpp::Logger logger)
+{
+  lookahead_dist_ = lookahead_dist;
+  max_vel_ = max_vel;
+  max_acc_ = max_acc;
+  traj_goal_tolerance_ = traj_goal_tolerance;
+  los_sampling_ratio_ = los_sampling_ratio;
+  seed_spacing_ = seed_spacing;
+  clock_ = std::move(clock);
+  logger_ = logger;
+}
+
+void LocalPathProcessor::updateLimits(double max_vel, double max_acc, double traj_goal_tolerance)
+{
+  max_vel_ = max_vel;
+  max_acc_ = max_acc;
+  traj_goal_tolerance_ = traj_goal_tolerance;
+}
+
+void LocalPathProcessor::resetProgress()
+{
+  std::lock_guard<std::mutex> lock(progress_mutex_);
+  has_progress_ = false;
+  last_start_index_ = 0U;
+}
+
+LocalPathSeed LocalPathProcessor::buildSeed(
+  const std::vector<geometry_msgs::msg::PoseStamped> & global_path,
+  const geometry_msgs::msg::PoseStamped & current_pose,
+  const PlannerModeContext & mode_context) const
+{
+  LocalPathSeed seed;
+  if (global_path.empty()) {
+    return seed;
+  }
+
+  Eigen::Vector3d global_goal(global_path.back().pose.position.x, global_path.back().pose.position.y, 0.0);
+  Eigen::Vector3d cur_pos(current_pose.pose.position.x, current_pose.pose.position.y, 0.0);
+
+  size_t global_start_index = 0U;
+  seed.dense_path = extractLocalPath(global_path, cur_pos, global_start_index);
+  const bool clip_required =
+    mode_context.mode() == PlannerMode::EXPLORATION || mode_context.clipSeedByRogBoundary();
+  const bool clip_ok = clipLocalPathByRogBoundary(seed.dense_path, mode_context);
+  if (clip_required && (!clip_ok || seed.dense_path.size() < 2U)) {
+    RCLCPP_WARN_THROTTLE(logger_,
+      *clock_,
+      2000,
+      "[MincoPlanner] Local seed path is outside ROGMap boundary or too short after clipping.");
+    return seed;
+  }
+  if (seed.dense_path.size() < 2U) {
+    return seed;
+  }
+
+  seed.global_end_index = global_start_index + seed.dense_path.size() - 1U;
+  seed.local_end_is_goal = (global_goal - seed.dense_path.back()).head<2>().norm() <= traj_goal_tolerance_;
+
+  // 几何 seed = A* 原始路径 → LOS 贪心简化 → 沿直线段均匀重采样。
+  // 不再用 getSparseWaypoints() 的“按梯形时间回查 A* 原始格点”作为主 waypoint 来源：
+  // 那会把 A* 的栅格阶梯直接变成 MINCO 的硬 waypoint。
+  const auto los_query = mode_context.dynamicQuery();
+  seed.los_anchors =
+    utils::simplifyPathByLOS(seed.dense_path, los_query, los_sampling_ratio_);
+  seed.sparse_waypoints = utils::resampleUniform(seed.los_anchors, seed_spacing_);
+  seed.seed_tangents = utils::computeSeedTangents(seed.sparse_waypoints);
+
+  seed.valid = seed.sparse_waypoints.size() >= 2U;
+  return seed;
+}
+
+std::vector<Eigen::Vector3d> LocalPathProcessor::extractLocalPath(
+  const std::vector<geometry_msgs::msg::PoseStamped> & global_path,
+  const Eigen::Vector3d & cur_pos,
+  size_t & global_start_index) const
+{
+  std::vector<Eigen::Vector3d> local_segment;
+  global_start_index = 0U;
+  if (global_path.size() < 2U) {
+    return local_segment;
+  }
+
+  size_t search_begin = 0U;
+  size_t search_end = global_path.size() - 2U;
+  {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    if (has_progress_) {
+      // Keep the nearest-segment search ahead of the previously accepted progress.
+      search_begin = std::min(last_start_index_, search_end);
+      search_end = search_begin;
+      double search_length = 0.0;
+      while (search_end + 1U < global_path.size() && search_length < lookahead_dist_) {
+        const auto & p0 = global_path[search_end].pose.position;
+        const auto & p1 = global_path[search_end + 1U].pose.position;
+        search_length += std::hypot(p1.x - p0.x, p1.y - p0.y);
+        if (search_end + 1U >= global_path.size() - 1U) {
+          break;
+        }
+        ++search_end;
+      }
+    }
+  }
+
+  size_t best_segment = search_begin;
+  double projection_ratio = 0.0;
+  double min_dist_sq = std::numeric_limits<double>::max();
+  auto find_projection = [&](size_t begin, size_t end) {
+    for (size_t i = begin; i <= end; ++i) {
+      const Eigen::Vector2d p0(global_path[i].pose.position.x, global_path[i].pose.position.y);
+      const Eigen::Vector2d p1(
+        global_path[i + 1U].pose.position.x, global_path[i + 1U].pose.position.y);
+      const Eigen::Vector2d segment = p1 - p0;
+      const double length_sq = segment.squaredNorm();
+      const double ratio = length_sq > 1e-12
+                             ? std::clamp((cur_pos.head<2>() - p0).dot(segment) / length_sq, 0.0, 1.0)
+                             : 0.0;
+      const double dist_sq = (cur_pos.head<2>() - (p0 + ratio * segment)).squaredNorm();
+      if (dist_sq < min_dist_sq) {
+        min_dist_sq = dist_sq;
+        best_segment = i;
+        projection_ratio = ratio;
+      }
+    }
+  };
+  find_projection(search_begin, search_end);
+  bool used_global_search = false;
+  // Re-anchor the path progress if the tracked forward segment is no longer nearby.
+  if (min_dist_sq > lookahead_dist_ * lookahead_dist_ &&
+      (search_begin != 0U || search_end != global_path.size() - 2U)) {
+    min_dist_sq = std::numeric_limits<double>::max();
+    find_projection(0U, global_path.size() - 2U);
+    used_global_search = true;
+  }
+
+  const Eigen::Vector3d segment_start(global_path[best_segment].pose.position.x,
+    global_path[best_segment].pose.position.y,
+    0.0);
+  const Eigen::Vector3d segment_end(global_path[best_segment + 1U].pose.position.x,
+    global_path[best_segment + 1U].pose.position.y,
+    0.0);
+  Eigen::Vector3d projected_start = segment_start + projection_ratio * (segment_end - segment_start);
+  size_t next_index = best_segment + 1U;
+  global_start_index = best_segment;
+  if (projection_ratio >= 1.0 - 1e-6) {
+    projected_start = segment_end;
+    global_start_index = best_segment + 1U;
+    ++next_index;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(progress_mutex_);
+    last_start_index_ = (!has_progress_ || used_global_search)
+                          ? global_start_index
+                          : std::max(last_start_index_, global_start_index);
+    has_progress_ = true;
+  }
+
+  double accum_dist = 0.0;
+  local_segment.push_back(projected_start);
+
+  for (size_t i = next_index; i < global_path.size(); ++i) {
+    const Eigen::Vector3d next_point(
+      global_path[i].pose.position.x, global_path[i].pose.position.y, 0.0);
+    const double dist = (next_point - local_segment.back()).head<2>().norm();
+    accum_dist += dist;
+
+    local_segment.push_back(next_point);
+
+    if (accum_dist >= lookahead_dist_) {
+      break;
+    }
+  }
+
+  return local_segment;
+}
+
+bool LocalPathProcessor::clipLocalPathByRogBoundary(
+  std::vector<Eigen::Vector3d> & path, const PlannerModeContext & mode_context) const
+{
+  if (path.empty()) {
+    return false;
+  }
+
+  const bool enable_clip =
+    mode_context.mode() == PlannerMode::EXPLORATION || mode_context.clipSeedByRogBoundary();
+  if (!enable_clip) {
+    return path.size() >= 2U;
+  }
+
+  const auto query = mode_context.dynamicQuery();
+  if (!query) {
+    return false;
+  }
+
+  const double margin = mode_context.mode() == PlannerMode::PRIORMAP
+                          ? mode_context.rogBoundaryMargin()
+                          : mode_context.explorationBoundaryMargin();
+  const int margin_cells =
+    std::max(0, static_cast<int>(std::ceil(margin / std::max(1e-6, query->resolution()))));
+  const int max_x = static_cast<int>(query->sizeX());
+  const int max_y = static_cast<int>(query->sizeY());
+  if (max_x <= 0 || max_y <= 0) {
+    return false;
+  }
+
+  const double sample_step = mode_context.mode() == PlannerMode::PRIORMAP
+                               ? mode_context.rogBoundarySampleStep()
+                               : mode_context.explorationBoundarySampleStep();
+  const double step = std::max(query->resolution(), std::max(1e-3, sample_step));
+
+  auto inside_boundary = [&query, margin_cells, max_x, max_y](const Eigen::Vector3d & p) {
+    unsigned int mx = 0;
+    unsigned int my = 0;
+    if (!query->worldToMap(p.x(), p.y(), mx, my)) {
+      return false;
+    }
+    const int ix = static_cast<int>(mx);
+    const int iy = static_cast<int>(my);
+    return ix >= margin_cells && iy >= margin_cells && ix < max_x - margin_cells &&
+           iy < max_y - margin_cells;
+  };
+
+  std::vector<Eigen::Vector3d> clipped;
+  clipped.reserve(path.size());
+  for (size_t i = 0; i < path.size(); ++i) {
+    if (!inside_boundary(path[i])) {
+      if (i == 0U) {
+        path.clear();
+        RCLCPP_WARN_THROTTLE(logger_,
+          *clock_,
+          2000,
+          "[MincoPlanner] Local seed path starts outside ROGMap boundary; reject local replan seed.");
+        return false;
+      }
+      break;
+    }
+    if (i > 0U) {
+      const Eigen::Vector3d delta = path[i] - path[i - 1U];
+      const int samples = std::max(1, static_cast<int>(std::ceil(delta.norm() / step)));
+      for (int s = 1; s <= samples; ++s) {
+        const double ratio = static_cast<double>(s) / static_cast<double>(samples);
+        if (!inside_boundary(path[i - 1U] + ratio * delta)) {
+          path.swap(clipped);
+          return path.size() >= 2U;
+        }
+      }
+    }
+    clipped.push_back(path[i]);
+  }
+
+  path.swap(clipped);
+  return path.size() >= 2U;
+}
+
+}  // namespace minco_planner

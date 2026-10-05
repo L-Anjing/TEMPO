@@ -1,0 +1,11 @@
+# 单 MID-360 驱动参数。
+# IP/端口在本目录 MID360_config.json 中，由 launch 传入 user_config_path（那个文件是 JSON，
+# 标准 JSON 不支持注释，所以雷达 IP 与安装外参的说明见 README 与随附的 launch）。
+/**:
+    ros__parameters:
+        xfer_format: 1          # 点云消息格式：0=PointCloud2，1=Livox CustomMsg，2=PCL。Point-LIO 配的是 lidar_type=1，必须用 1，否则预处理会解错格式。
+        multi_topic: 0          # 是否每个雷达用独立话题：0=所有雷达共用 /livox/lidar 与 /livox/imu；单雷达保持 0，话题名要和 LIO 的 lid_topic/imu_topic 对得上。
+        data_src: 0             # 数据来源：0=真实雷达，1=录制的 LVX 文件，2=串口。实车保持 0。
+        publish_freq: 100.0     # Hz；点云发布频率。直接决定 Point-LIO 每帧的点数和帧预算（100 Hz → 约 2000 点/帧、10 ms 预算）；ROGMap 按 update_period_ms 降频消费。
+        output_data_type: 0     # 点云附加字段：0=只输出 xyz，1=附带反射率/tag 等。Point-LIO 只用 xyz 与点时间戳，保持 0 最省带宽。
+        frame_id: "livox_frame" # 点云 header.frame_id；必须等于 Point-LIO 的 frames.lidar，否则 TF 链会断在雷达这一环。
